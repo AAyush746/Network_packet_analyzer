@@ -5,8 +5,10 @@ protocol dissection, rolling traffic statistics, anomaly detection, and pcap
 import/export behind a Tkinter GUI.
 
 ```
-sudo python main.py                 # live capture (needs CAP_NET_RAW)
+sudo python main.py                 # live capture, GUI (needs CAP_NET_RAW)
 python main.py --demo               # run on synthetic traffic, no privileges
+sudo python main.py --capture -i eth0 -f "tcp port 5201" --duration 60
+                                   # headless timed capture; prints rate on exit
 python -m pytest                    # 174 tests
 python bench.py --packets 20000     # reproduce the numbers below
 ```
@@ -193,6 +195,39 @@ answered. The plaintext credential rule inspects `record.payload` and never
 bytes — and **never includes the secret in its own alert text**.
 
 ---
+
+## Measuring against real traffic
+
+Synthetic traffic proves the decoder is fast. It cannot prove the analyzer keeps
+up with a real link, because scapy never had to build frames from the wire.
+`--capture` exists for that: capture headlessly for a fixed duration, print the
+rate, exit.
+
+```bash
+# terminal 1 -- traffic generator
+iperf3 -s
+
+# terminal 2 -- 60 seconds of load
+iperf3 -c 127.0.0.1 -t 60
+
+# terminal 3 -- measure, same window
+sudo python main.py --capture -i lo -f "tcp port 5201" --duration 60
+```
+
+Read the result as a *ratio*, not a single number. Compare the analyzer's
+`packets/sec` against the packet rate implied by iperf3's reported bitrate
+(`iperf3` prints retransmits and Mbit/sec; divide by the average frame size to get
+pps). If the analyzer's rate is at or above the wire's packet rate, it kept up;
+if it is below, packets were dropped, and `queue drops` says by how much.
+
+A queue drop count above zero means the analysis pipeline could not sustain that
+rate, and the printed packets/sec understates the link. The queue is bounded on
+purpose — dropping is preferable to unbounded memory growth — but it makes the
+measurement honest.
+
+Capture on the interface the traffic actually crosses. On a single host,
+loopback sees the traffic and `eth0` does not; capturing the wrong interface
+reports zero packets and looks like a failure of the analyzer.
 
 ## Development
 
