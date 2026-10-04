@@ -30,6 +30,11 @@ packages = ["pktanalyzer", "pktanalyzer.ui"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 filterwarnings = ["ignore::DeprecationWarning"]
+# The package is not installed when running from a clean checkout, and bare
+# `pytest` does not put the working directory on sys.path the way
+# `python -m pytest` does. Without this, collection fails with
+# ModuleNotFoundError on a fresh clone or in CI.
+pythonpath = ["."]
 
 [tool.coverage.run]
 branch = true
