@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pktanalyzer"
+version = "0.2.0"
+description = "Live network packet analyzer with protocol dissection, traffic statistics and anomaly detection"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "scapy>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+pktanalyzer = "pktanalyzer.ui.app:main"
+
+[tool.setuptools]
+packages = ["pktanalyzer", "pktanalyzer.ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+source = ["pktanalyzer"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    # Defensive broad excepts are deliberate here: a malformed frame or a
+    # broken detection rule must never take down the capture thread, and every
+    # call site records the failure into a counter or an alert list.
+    "BLE001",
+    "B904",
+    # Long lines inside SQL-like column definitions read worse when wrapped.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately build odd objects and assert on broad exception types.
+"tests/*" = ["B017", "SIM117", "RUF059"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pktanalyzer"]

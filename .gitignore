@@ -1,0 +1,39 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Test / coverage artefacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Captures produced by the app -- these are large, binary and often contain
+# sensitive traffic. Never commit them.
+captures/
+*.pcap
+*.pcapng
+*.cap
+!tests/fixtures/*.pcap
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

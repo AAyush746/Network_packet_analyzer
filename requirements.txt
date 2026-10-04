@@ -1,0 +1,7 @@
+# Runtime
+scapy>=2.5.0
+
+# Development / CI
+pytest>=7.4
+pytest-cov>=4.1
+ruff>=0.4
