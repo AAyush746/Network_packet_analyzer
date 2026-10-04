@@ -152,19 +152,68 @@ def bench_memory(frames: list) -> float:
     return peak / 1024 / 1024
 
 
-def accuracy_report() -> dict[str, float]:
-    positives, negatives = [], []
-    for i in range(300):
-        packet = Ether() / IP(src="10.0.0.66", dst=f"10.0.{i % 4}.{i % 9 + 1}") / TCP(dport=i % 900 + 1, flags="S")
-        packet.time = 1000.0 + i * 0.02
-        positives.append(decode(packet, i))
+def _decode_all(packets: list, start: float = 1000.0, step: float = 0.02) -> list:
+    records = []
+    for index, packet in enumerate(packets):
+        packet.time = start + index * step
+        records.append(decode(packet, index))
+    return records
 
-        packet = Ether() / IP(src=f"10.1.{i % 250}.5", dst=f"10.2.{i % 9}.{i % 250 + 1}") / \
-            TCP(dport=[80, 443, 22, 53][i % 4], flags="S")
-        packet.time = 1000.0 + i * 0.02
-        negatives.append(decode(packet, i))
 
-    return measure_accuracy(positives, negatives)
+def _scan_packets(count: int = 300) -> list:
+    return [
+        Ether() / IP(src="10.0.0.66", dst=f"10.0.{i % 4}.{i % 9 + 1}") / TCP(dport=i % 900 + 1, flags="S")
+        for i in range(count)
+    ]
+
+
+def _negative_suites() -> dict[str, list]:
+    """Benign traffic patterns, hardest last.
+
+    The easy suite is what the first version of this benchmark used, and it
+    reported precision 1.000 while telling you almost nothing -- none of those
+    patterns resemble a scanner. The single-host sweep is the pattern that
+    exposed a real defect: the rule counted distinct destination ports without
+    counting distinct destinations, so legitimate service discovery scored as a
+    scan and precision fell to 0.500.
+    """
+    return {
+        "ordinary browsing": _decode_all([
+            Ether() / IP(src=f"10.1.{i % 250}.5", dst=f"10.2.{i % 9}.{i % 250 + 1}")
+            / TCP(dport=[80, 443, 22, 53][i % 4], flags="S")
+            for i in range(500)
+        ]),
+        "many hosts, random ports": _decode_all([
+            Ether() / IP(src=f"10.{i % 50}.{i % 13}.7", dst=f"10.{(i // 50) % 40}.{i % 201}.9")
+            / TCP(dport=(i * 7) % 1024 + 1, flags="S")
+            for i in range(500)
+        ]),
+        "single-host port sweep": _decode_all([
+            Ether() / IP(src="10.5.0.9", dst="10.5.0.10") / TCP(dport=i + 1, flags="S")
+            for i in range(300)
+        ]),
+        "20 hosts x 15 ports (ambiguous)": _decode_all([
+            Ether() / IP(src="10.7.0.9", dst=f"10.7.1.{i % 20 + 1}") / TCP(dport=i + 1, flags="S")
+            for i in range(300)
+        ]),
+    }
+
+
+def accuracy_report() -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Score the port-scan rule per benign pattern plus against all of them.
+
+    Reporting a single pooled figure hid the interesting part: precision was
+    perfect on easy traffic and broken on traffic that looked like scanning.
+    Per-pattern numbers make that visible instead of averaging it away.
+    """
+    positives = _decode_all(_scan_packets())
+    suites = _negative_suites()
+
+    per_pattern = {
+        label: measure_accuracy(positives, records) for label, records in suites.items()
+    }
+    pooled = measure_accuracy(positives, [r for records in suites.values() for r in records])
+    return pooled, per_pattern
 
 
 def main() -> int:
@@ -235,10 +284,24 @@ def main() -> int:
     )
 
     # --- accuracy ---
-    report = accuracy_report()
+    pooled, per_pattern = accuracy_report()
     print("\n== port-scan detection accuracy (labelled synthetic traffic) ==")
+    print("  per benign pattern (300 scan probes scored against each):")
+    for label, report in per_pattern.items():
+        print(
+            f"    {label:34} FP={report['false_positives']:4}  "
+            f"P={report['precision']:.3f}  R={report['recall']:.3f}  F1={report['f1']:.3f}"
+        )
+    print("  pooled:")
     for key in ("precision", "recall", "f1", "true_positives", "false_positives", "false_negatives"):
-        print(f"  {key:18}: {report[key]}")
+        print(f"    {key:18}: {pooled[key]}")
+    print(
+        "  note: in-sample (thresholds were chosen against this generator) and\n"
+        "  synthetic, so these are not comparable to published CICIDS/MAWI figures.\n"
+        "  The '20 hosts x 15 ports' pattern is genuinely ambiguous -- a host\n"
+        "  sweeping 300 ports across 20 hosts really does look like a scanner --\n"
+        "  and is left as a known false positive rather than tuned away."
+    )
 
     # --- export ---
     if args.export:

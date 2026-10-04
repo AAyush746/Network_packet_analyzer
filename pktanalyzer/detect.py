@@ -26,21 +26,36 @@ ALERT_HISTORY = 500
 
 
 class PortScanDetector:
-    """Flags a source host that contacts many destination ports in one window.
+    """Flags a source host that sweeps ports across many hosts in one window.
 
-    A normal client opens a handful of ports to a handful of hosts. A scanner
-    sweeps ports, so the signal is *distinct destination ports per source*
-    inside a short window, not raw volume.
+    Counting distinct destination ports alone is not sufficient. A single host
+    opening 300 ports on *one* destination -- service discovery, a P2P client, a
+    monitoring agent -- produces the same port count as a scanner and was the
+    dominant false positive when this rule was first measured: precision fell
+    from 1.000 to 0.500 against that traffic.
+
+    A horizontal port scan is defined by breadth on both axes, so the rule
+    requires many distinct destination ports *and* many distinct destinations
+    inside the window. Set ``min_destinations=1`` to restore the older
+    port-only behaviour, which is the right setting for watching for vertical
+    (single-host) sweeps and will be noisier on most real networks.
     """
 
     rule_name = "port_scan"
 
-    def __init__(self, threshold: int = 15, window: float = 5.0, cooldown: float = 20.0) -> None:
+    def __init__(
+        self,
+        threshold: int = 15,
+        window: float = 5.0,
+        cooldown: float = 20.0,
+        min_destinations: int = 10,
+    ) -> None:
         self.threshold = threshold
         self.window = window
         self.cooldown = cooldown
-        # source IP -> deque of (timestamp, destination port)
-        self._probes: dict[str, deque[tuple[float, int]]] = defaultdict(
+        self.min_destinations = min_destinations
+        # source IP -> deque of (timestamp, destination port, destination IP)
+        self._probes: dict[str, deque[tuple[float, int, str]]] = defaultdict(
             lambda: deque(maxlen=2048)
         )
         self._last_alert: dict[str, float] = {}
@@ -51,14 +66,18 @@ class PortScanDetector:
 
         now = record.timestamp
         probes = self._probes[record.src_ip]
-        probes.append((now, record.dst_port))
+        probes.append((now, record.dst_port, record.dst_ip))
 
         cutoff = now - self.window
         while probes and probes[0][0] < cutoff:
             probes.popleft()
 
-        distinct = len({port for _, port in probes})
-        if distinct < self.threshold:
+        distinct_ports = {port for _, port, _ in probes}
+        if len(distinct_ports) < self.threshold:
+            return None
+
+        destinations = {dst for _, _, dst in probes if dst}
+        if len(destinations) < self.min_destinations:
             return None
 
         previous = self._last_alert.get(record.src_ip)
@@ -66,15 +85,16 @@ class PortScanDetector:
             return None
         self._last_alert[record.src_ip] = now
 
-        targets = sorted({port for _, port in probes})
+        targets = sorted(distinct_ports)
+        host_count = len(destinations) or 1
         return Alert(
             rule=self.rule_name,
             severity=SEVERITY_HIGH,
             timestamp=now,
             message=(
-                f"{record.src_ip} probed {distinct} distinct ports on "
-                f"{record.dst_ip or 'multiple hosts'} in {self.window:.0f}s "
-                f"({', '.join(str(p) for p in targets[:8])}"
+                f"{record.src_ip} probed {len(distinct_ports)} distinct ports on "
+                f"{host_count} host{'s' if host_count != 1 else ''} in "
+                f"{self.window:.0f}s ({', '.join(str(p) for p in targets[:8])}"
                 f"{'...' if len(targets) > 8 else ''})"
             ),
         )
@@ -307,6 +327,10 @@ def measure_accuracy(
     packet after the first alert as a false negative and make a working rule
     look like it had ~0 recall. Detection windows and thresholds stay active,
     because those *are* the decision.
+
+    Positives and negatives must not share a source IP. State is kept per
+    source, so interleaving benign packets from the attacker under test lets
+    them satisfy the rule on the attacker's behalf and silently inflates recall.
     """
     rule = rule_factory()
     if hasattr(rule, "cooldown"):

@@ -7,7 +7,7 @@ import/export behind a Tkinter GUI.
 ```
 sudo python main.py                 # live capture (needs CAP_NET_RAW)
 python main.py --demo               # run on synthetic traffic, no privileges
-python -m pytest                    # 167 tests
+python -m pytest                    # 174 tests
 python bench.py --packets 20000     # reproduce the numbers below
 ```
 
@@ -57,7 +57,7 @@ pktanalyzer/
 ```
 
 Because `decode`, `stats` and `detect` are headless, the entire pipeline is
-testable without a display or a network interface — which is what the 167 tests
+testable without a display or a network interface — which is what the 174 tests
 exercise.
 
 ### Why the queue
@@ -88,8 +88,9 @@ scan).
 | p50 / p95 / p99 | 50.6 / 322.5 / 441.8 µs |
 | Decode + stats + detection | **7,191 packets/sec** (139 µs/packet) |
 | Memory per record | **108 bytes** (2.1 MB for 20,000 records) |
-| Port-scan precision / recall / F1 | **1.000 / 0.953 / 0.976** |
-| Tests / coverage | 167 tests / 86% |
+| Port-scan recall | **0.953** (stable across every benign pattern) |
+| Port-scan precision | **1.000** on 3 of 4 benign patterns, **0.500** on the ambiguous one — see below |
+| Tests / coverage | 174 tests / 86% |
 
 Two numbers are deliberately quoted conservatively:
 
@@ -142,18 +143,48 @@ benchmark rather than by arithmetic on the two results.
 
 ### Detection accuracy
 
-Precision/recall are measured, not asserted — `detect.measure_accuracy()` scores
-a rule against labelled traffic, and `bench.py` prints the result:
+Precision and recall are measured, not asserted. `detect.measure_accuracy()`
+scores a rule against labelled traffic and `bench.py` prints the result **per
+benign pattern**, because a single pooled number hid a real defect:
 
 ```
-precision 1.0 | recall 0.953 | f1 0.976
-TP 286 | FP 0 | FN 14
+  per benign pattern (300 scan probes scored against each):
+    ordinary browsing                  FP=   0  P=1.000  R=0.953  F1=0.976
+    many hosts, random ports           FP=   0  P=1.000  R=0.953  F1=0.976
+    single-host port sweep             FP=   0  P=1.000  R=0.953  F1=0.976
+    20 hosts x 15 ports (ambiguous)    FP= 286  P=0.500  R=0.953  F1=0.656
+  pooled: P=0.500  R=0.953  F1=0.656
 ```
 
-Recall is capped below 1.0 by design: a window-based rule needs `threshold`
-packets of evidence before it can fire, so the first `threshold - 1` packets of
-any scan are unavoidable misses. `tests/test_detect.py` asserts that exact
-ceiling rather than an impossible zero false negatives.
+**How this number was found to be wrong.** The original benchmark scored the
+rule against browsing-like traffic and reported `FP=0`, `F1=0.976`. Re-testing
+with benign traffic that *resembles* a scanner showed precision collapsing to
+0.500: the rule counted distinct destination ports per source but never counted
+distinct destination *hosts*, so a single host opening 300 ports on one
+destination — service discovery, a P2P client, a monitoring agent — scored as a
+scan. `PortScanDetector` now requires breadth on both axes
+(`threshold` ports **and** `min_destinations` hosts in the window), which
+removed that entire false-positive class; the "single-host port sweep" row above
+went from 286 false positives to 0.
+
+Three honest caveats:
+
+* **In-sample.** Thresholds were chosen while designing the rule, against this
+  generator, and scored on the same generator. There is no held-out split.
+* **Synthetic.** Not comparable to published CICIDS2017 or MAWI figures. Those
+  report 99–100% on datasets that are ~98% benign traffic, where predicting
+  "benign" every time already scores 98% — the metric carries little
+  information. Real per-network rates are the only meaningful comparison.
+* **One known false positive remains.** A host sweeping 300 ports across 20
+  hosts is genuinely ambiguous given only these two signals. Raising
+  `min_destinations` above 20 rejects it, but that number would be fitted to
+  this generator rather than chosen on principle, so it is left as-is,
+  documented, and pinned by a test.
+
+Recall `0.953` is stable across every pattern because it is a property of the
+window: the first `threshold - 1` packets of a scan cannot be flagged, since the
+rule has no evidence yet. `tests/test_detect.py` asserts that exact ceiling
+rather than an impossible zero false negatives.
 
 The `SYN flood` rule tracks *outstanding* SYNs per destination rather than a raw
 SYN rate, because a busy TLS client legitimately emits many SYNs that get
@@ -168,7 +199,7 @@ bytes — and **never includes the secret in its own alert text**.
 ```bash
 pip install -r requirements.txt
 
-pytest                       # 167 tests
+pytest                       # 174 tests
 pytest --cov=pktanalyzer     # coverage report
 ruff check .                 # lint
 python bench.py --packets 50000
@@ -190,6 +221,11 @@ this rewrite introduced: a name collision that wrote capture errors to the
 statistics object, a queue that returned alert tuples where callers expected
 `Alert` objects, one failing rule discarding already-decoded packets, and tree
 item ids derived from packet indexes that collided on replay.
+
+Not every defect came from a test, though. The port-scan false positive above
+was found by *disbelieving a metric*: the number looked good, so the negative
+set was rebuilt until it wasn't. That is the change worth making first next
+time — a green metric and a weak test set are the same failure.
 
 ---
 

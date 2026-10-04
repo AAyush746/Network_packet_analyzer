@@ -30,17 +30,95 @@ def syn(src="10.0.0.1", dst="10.0.0.2", dport=80, flags="S"):
     return Ether(**ETH) / IP(src=src, dst=dst) / TCP(sport=40000, dport=dport, flags=flags)
 
 
+def horizontal(src="10.0.0.1", ports=20, hosts=20, start=1000.0, step=0.01):
+    """A realistic horizontal scan: many ports spread across many hosts.
+
+    Separate from ``syn`` so tests cannot accidentally model a single-host
+    vertical sweep, which the rule deliberately ignores.
+    """
+    records = []
+    for i in range(ports):
+        records.append(
+            record_of(
+                syn(src=src, dst=f"10.9.{i % hosts}.{i % hosts + 1}", dport=1000 + i),
+                timestamp=start + i * step,
+            )
+        )
+    return records
+
+
+def vertical(src="10.0.0.1", ports=30, dst="10.0.0.2", start=1000.0, step=0.01):
+    """One host opening many ports on a single destination."""
+    return [
+        record_of(syn(src=src, dst=dst, dport=1000 + i), timestamp=start + i * step)
+        for i in range(ports)
+    ]
+
+
 class TestPortScan:
     def test_broad_sweep_is_flagged(self):
         detector = PortScanDetector(threshold=10, window=5.0)
 
-        alerts = [detector.inspect(record_of(syn(dport=p), timestamp=1000.0 + p * 0.01))
-                  for p in range(1, 21)]
+        alerts = [detector.inspect(r) for r in horizontal(ports=20, hosts=20)]
 
         raised = [a for a in alerts if a]
         assert len(raised) == 1
         assert raised[0].rule == "port_scan"
         assert "10.0.0.1" in raised[0].message
+
+    def test_sweep_message_reports_both_axes(self):
+        """An operator needs to see breadth, not just a bare rule name."""
+        detector = PortScanDetector(threshold=10, window=5.0)
+
+        raised = [a for a in (detector.inspect(r) for r in horizontal(ports=20, hosts=20)) if a]
+
+        # Fires as soon as both axes cross the threshold, so the reported
+        # breadth is the threshold, not the eventual total.
+        assert "10 distinct ports" in raised[0].message
+        assert "10 hosts" in raised[0].message
+
+    def test_vertical_sweep_on_one_host_is_ignored_by_default(self):
+        """The false positive that made precision collapse to 0.500.
+
+        Service discovery, P2P clients and monitoring agents all open many ports
+        on a single destination. Counting ports alone cannot tell them apart
+        from a scanner; requiring breadth across hosts can.
+        """
+        detector = PortScanDetector(threshold=10, window=5.0)
+
+        alerts = [detector.inspect(r) for r in vertical(ports=30)]
+
+        assert [a for a in alerts if a] == []
+
+    def test_vertical_sweep_is_detectable_when_explicitly_requested(self):
+        """Single-host sweeps are real; the gate is opt-out, not opt-in."""
+        detector = PortScanDetector(threshold=10, window=5.0, min_destinations=1)
+
+        alerts = [detector.inspect(r) for r in vertical(ports=30)]
+
+        assert [a for a in alerts if a]
+
+    def test_wide_ports_narrow_hosts_is_not_a_scan(self):
+        """Both axes must be wide. Many ports on two hosts is not a sweep."""
+        detector = PortScanDetector(threshold=10, window=5.0)
+
+        alerts = [
+            detector.inspect(r)
+            for r in horizontal(ports=30, hosts=2)
+        ]
+
+        assert [a for a in alerts if a] == []
+
+    def test_narrow_ports_wide_hosts_is_not_a_scan(self):
+        """Many hosts but few ports each is normal internet traffic."""
+        detector = PortScanDetector(threshold=10, window=5.0)
+
+        alerts = [
+            detector.inspect(r)
+            for r in horizontal(ports=4, hosts=30)
+        ]
+
+        assert [a for a in alerts if a] == []
 
     def test_ordinary_browsing_is_not_flagged(self):
         """Six ports to different hosts is a browser, not a scanner."""
@@ -65,20 +143,23 @@ class TestPortScan:
         """Same port count, spread over 30s, is below the rate threshold."""
         detector = PortScanDetector(threshold=10, window=5.0)
 
-        for p in range(1, 21):
-            detector.inspect(record_of(syn(dport=p), timestamp=1000.0 + p))
+        for r in horizontal(ports=20, hosts=20, start=1000.0, step=1.0):
+            detector.inspect(r)
 
-        assert detector.inspect(record_of(syn(dport=99), timestamp=1030.0)) is None
+        assert detector.inspect(
+            record_of(syn(dst="10.9.99.99", dport=9999), timestamp=1030.0)
+        ) is None
 
     def test_cooldown_suppresses_repeat_alerts(self):
         detector = PortScanDetector(threshold=5, window=10.0, cooldown=30.0)
 
         first = None
-        for p in range(1, 30):
-            alert = detector.inspect(record_of(syn(dport=p), timestamp=1000.0 + p * 0.05))
-            first = first or alert
+        for r in horizontal(ports=29, hosts=29, start=1000.0, step=0.05):
+            first = first or detector.inspect(r)
 
-        second = detector.inspect(record_of(syn(dport=200), timestamp=1002.0))
+        second = detector.inspect(
+            record_of(syn(dst="10.9.88.88", dport=9999), timestamp=1002.0)
+        )
 
         assert first is not None
         assert second is None
@@ -86,16 +167,11 @@ class TestPortScan:
     def test_two_scanners_are_reported_separately(self):
         detector = PortScanDetector(threshold=8, window=10.0)
 
-        first = None
-        for p in range(1, 15):
-            first = first or detector.inspect(
-                record_of(syn(src="10.1.1.1", dport=p), timestamp=1000.0 + p * 0.01)
-            )
-        second = None
-        for p in range(1, 15):
-            second = second or detector.inspect(
-                record_of(syn(src="10.2.2.2", dport=p), timestamp=1000.0 + p * 0.01)
-            )
+        first = second = None
+        for r in horizontal(src="10.1.1.1", ports=14, hosts=14):
+            first = first or detector.inspect(r)
+        for r in horizontal(src="10.2.2.2", ports=14, hosts=14):
+            second = second or detector.inspect(r)
 
         assert first is not None and second is not None
         assert "10.1.1.1" in first.message
@@ -231,7 +307,7 @@ class TestEngine:
     def test_history_is_bounded(self):
         engine = DetectionEngine(rules=[PortScanDetector(threshold=1, cooldown=0.0)])
         for i in range(1200):
-            engine.inspect(record_of(syn(dport=i % 60 + 1), timestamp=1000.0 + i * 0.01))
+            engine.inspect(horizontal(ports=60, hosts=60, start=1000.0 + i * 0.01)[i % 60])
 
         assert len(engine.history) <= 500
 
@@ -241,15 +317,14 @@ class TestEngine:
                 raise RuntimeError("rule is broken")
 
         engine = DetectionEngine(rules=[Exploding(), PortScanDetector(threshold=5)])
-        alerts = [engine.inspect(record_of(syn(dport=p), timestamp=1000.0 + p * 0.01))
-                  for p in range(1, 12)]
+        alerts = [engine.inspect(r) for r in horizontal(ports=11, hosts=11)]
 
         assert any(a for a in alerts)
 
     def test_reset_clears_history_and_rule_state(self):
         engine = DetectionEngine(rules=[PortScanDetector(threshold=2)])
-        for p in range(1, 8):
-            engine.inspect(record_of(syn(dport=p), timestamp=1000.0 + p * 0.01))
+        for r in horizontal(ports=7, hosts=7):
+            engine.inspect(r)
 
         engine.reset()
         assert engine.history == []
@@ -257,9 +332,8 @@ class TestEngine:
 
     def test_inspect_many_matches_per_packet_calls(self):
         engine = DetectionEngine()
-        records = [record_of(syn(dport=p), timestamp=1000.0 + p * 0.01) for p in range(20)]
 
-        assert len(engine.inspect_many(records)) >= 1
+        assert len(engine.inspect_many(horizontal(ports=20, hosts=20))) >= 1
 
 
 class TestAccuracyMeasurement:
@@ -306,3 +380,43 @@ class TestAccuracyMeasurement:
         assert report["false_positives"] == 0, "benign traffic must never be flagged"
         assert report["false_negatives"] == warmup
         assert report["recall"] == pytest.approx(1 - warmup / len(positives), abs=0.01)
+
+    def test_single_host_sweep_is_not_a_false_positive(self):
+        """Guards the defect that made precision collapse to 0.500.
+
+        One host opening many ports on one destination is how service discovery,
+        P2P clients and monitoring agents behave. The original rule counted
+        distinct ports without counting distinct destinations, scored that
+        benign traffic as a scan, and produced 286 false positives here.
+        """
+        report = measure_accuracy(
+            horizontal(ports=300, hosts=36), vertical(ports=300, src="10.1.1.1")
+        )
+
+        assert report["false_positives"] == 0, report
+        assert report["precision"] == 1.0, report
+
+    def test_ambiguous_multi_host_sweep_is_a_known_false_positive(self):
+        """Pins the residual limitation instead of hiding it.
+
+        A host sweeping 300 ports across 20 hosts is indistinguishable from a
+        small horizontal scan using only these two signals. Raising
+        ``min_destinations`` above 20 would reject it, but that threshold would
+        be fitted to this synthetic generator rather than chosen on principle,
+        so the false positive is accepted and asserted here. If this test starts
+        failing because the rule genuinely improved, update the README's numbers
+        rather than deleting the case.
+        """
+        positives = horizontal(ports=300, hosts=36)
+        negatives = [
+            record_of(
+                syn(src="10.7.0.9", dst=f"10.7.1.{i % 20 + 1}", dport=1000 + i),
+                timestamp=1000.0 + i * 0.02,
+            )
+            for i in range(300)
+        ]
+
+        report = measure_accuracy(positives, negatives)
+
+        assert report["false_positives"] > 0, "expected the documented ambiguity to remain"
+        assert report["recall"] > 0.9, report

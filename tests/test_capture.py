@@ -20,8 +20,17 @@ from pktanalyzer.stats import TrafficStats
 ETH = dict(src="aa:bb:cc:00:00:01", dst="aa:bb:cc:00:00:02")
 
 
-def syn(dport=80, flags="S"):
-    return Ether(**ETH) / IP(src="10.0.0.1", dst="10.0.0.2") / TCP(dport=dport, flags=flags)
+def syn(dport=80, flags="S", dst="10.0.0.2"):
+    return Ether(**ETH) / IP(src="10.0.0.1", dst=dst) / TCP(dport=dport, flags=flags)
+
+
+def sweep(ports=11, hosts=11, src="10.0.0.1"):
+    """A horizontal scan: distinct ports spread across distinct hosts.
+
+    The port-scan rule requires breadth on both axes, so a single-host sweep
+    no longer produces alerts and cannot be used to assert alert plumbing.
+    """
+    return [syn(dport=1000 + i, dst=f"10.9.{i % hosts}.{i % hosts + 1}") for i in range(ports)]
 
 
 @pytest.fixture
@@ -183,7 +192,7 @@ class TestLifecycle:
 class TestQueueDrain:
     def test_drain_returns_records_and_alerts(self, fake_sniff):
         detector = DetectionEngine(rules=[PortScanDetector(threshold=5, cooldown=0.0)])
-        packets = [syn(dport=p) for p in range(1, 12)]
+        packets = sweep()
         engine = fake_sniff["run"](CaptureEngine(detector=detector), packets)
 
         records, alerts = engine.drain()
@@ -199,7 +208,7 @@ class TestQueueDrain:
 
     def test_drain_returns_flat_alert_objects_not_bundles(self, fake_sniff):
         """Each queued item carries an alert tuple; drain must flatten it."""
-        packets = [syn(dport=p) for p in range(1, 12)]
+        packets = sweep()
         engine = fake_sniff["run"](
             CaptureEngine(detector=DetectionEngine(rules=[PortScanDetector(threshold=5)])),
             packets,
@@ -245,7 +254,7 @@ class TestAnalyzerIntegration:
 
     def test_alerts_are_counted_on_stats(self, fake_sniff):
         stats, detector = TrafficStats(), DetectionEngine(rules=[PortScanDetector(threshold=5)])
-        packets = [syn(dport=p) for p in range(1, 12)]
+        packets = sweep()
         engine = fake_sniff["run"](CaptureEngine(stats=stats, detector=detector), packets)
         engine.drain()
 

@@ -50,8 +50,21 @@ def _demo(args: argparse.Namespace) -> int:
         frames.append(Ether() / IP(src=f"10.0.0.{i % 5 + 1}", dst="8.8.8.8")
                       / UDP(sport=53000 + i, dport=53)
                       / DNS(rd=1, qd=DNSQR(qname="example.com")))
-    for port in range(1, 40):  # a scan to trip the detector
-        frames.append(Ether() / IP(src="10.0.0.66", dst="10.0.0.1") / TCP(dport=port, flags="S"))
+
+    # A horizontal scan: many ports across many hosts, which is the signature the
+    # rule actually requires. Sweeping many ports on a *single* host is service
+    # discovery and is deliberately not flagged.
+    for i in range(60):
+        frames.append(
+            Ether() / IP(src="10.0.0.66", dst=f"10.0.1.{i % 20 + 1}")
+            / TCP(sport=40000, dport=1000 + i, flags="S")
+        )
+
+    # Deliberately include a benign single-host port sweep to show it is *not*
+    # reported -- the same port count that would be alarming spread over hosts.
+    for port in range(1, 30):
+        frames.append(Ether() / IP(src="10.0.0.99", dst="10.0.0.1") / TCP(dport=port, flags="S"))
+
     frames.append(Ether() / IP(src="10.0.0.1", dst="10.0.0.2") / ICMP())
     frames.append(Ether() / ARP(psrc="10.0.0.1", pdst="10.0.0.254"))
 
